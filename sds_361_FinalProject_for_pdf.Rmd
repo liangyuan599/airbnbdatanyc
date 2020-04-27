@@ -1,0 +1,741 @@
+---
+title: "Airbnb prices in New York City"
+date: "S&DS 361 Final Project"
+output:
+  pdf_document:
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+urlcolor: blue
+---
+
+# Introduction
+
+Our dataset consists of Airbnb listings in New York City, obtained from [Kaggle](https://www.kaggle.com/dgomonov/new-york-city-airbnb-open-data). It contains these variables:
+
+* ID and Host ID (numerical, discrete)
+* **Name of the listing** (text)
+* Name of the host (text)
+* **Neighborhood and neighborhood group** (categorical)
+* **Longitude and latitude of the listing** (numerical, continous)
+* **Type of room** (categorical)
+* **Price per night** (numerical, continous)
+* Minimum number of nights to stay (numerical, continous)
+* Time of last review (date)
+* Reviews per month (numerical, continous)
+* Availability out of 365 days in a year (numerical, continous)
+
+We primarily use the five variables bolded above.
+
+```{r, message = F, warning = F}
+library(tidyverse)
+options(knitr.kable.NA = '')
+knitr::opts_chunk$set(message = F, warning = F, cache = T)
+```
+
+```{r}
+airbnb <- read_csv("airbnb_nyc_2019.csv")
+```
+
+\newpage
+
+# Examining prices in-depth
+
+## Number of ratings versus price
+
+First, we'll examine the relationship betwen the number of ratings that a given listing has and the prices of the listing; we'll also stratify this by borough. Note that unfortunately, the dataset doesn't give us the average rating of each listing.
+
+Load packages we'll use in this section:
+
+```{r}
+library(MASS)
+library(lattice)
+library(car)
+library(leaps)
+
+if(!require(stargazer)) install.packages("stargazer"); library(stargazer)
+
+select <- dplyr::select  # overwrite MASS::select with dplyr::select
+```
+
+To get a sense of the data, let's plot make a simple plot to assess the distribution of prices:
+
+```{r, fig.height = 3.5}
+qplot(x = 1:nrow(airbnb), y = sort(airbnb$price)) +
+    labs(x = "Index", y = "Price", title = "Price of each listing")
+```
+
+The distribution is sharply right-skewed, as is expected for most data involving prices. Thus, we'll make the logarithm of the prices.
+
+```{r}
+# create a new filtered dataset
+airbnb_filtered <- airbnb
+airbnb_filtered[airbnb_filtered$price == 0, ] <- NA
+airbnb_filtered <- na.omit(airbnb_filtered)
+airbnb_filtered$price <- log(airbnb_filtered$price)
+
+# save for convenience
+n <- nrow(airbnb_filtered)
+```
+
+After doing so, we create some general plots of the data to get a better picture of the data. To start, we plot a general histogram of the number reviews on each listing was within each neighborhood group. Given that it's hard to see Staten Island and the Bronx, we made a separate plot for these two boroughs. Overall, there seems to be enough data within each borough in order to do the analysis we want.
+
+```{r}
+airbnb_filtered %>%
+    ggplot(aes(x = number_of_reviews)) +
+    geom_histogram(binwidth = 10, color = "black", fill = "white") +
+    facet_wrap(~neighbourhood_group) +
+    labs(x = "Number of reviews") +
+    ggtitle("Histogram of number of reviews in each borough")
+```
+
+```{r, fig.height = 2.25}
+p1 <- airbnb_filtered[airbnb_filtered$neighbourhood_group  == "Staten Island", ] %>%
+    ggplot(aes(x = number_of_reviews)) +
+    geom_histogram(binwidth = 5, color = "black", fill = "white") +
+    labs(x = "Number of reviews") +
+    ggtitle("Number of reviews in Staten Island")
+
+p2 <- airbnb_filtered[airbnb_filtered$neighbourhood_group  == "Bronx", ] %>%
+    ggplot(aes(x = number_of_reviews)) +
+    geom_histogram(binwidth = 5, color = "black", fill = "white") +
+    labs(x = "Number of reviews") +
+    ggtitle("Number of reviews in the Bronx")
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+After establishing that there was enough data within each borough, we plotted the price against the number of reviews to see if there was a trend in the data. Most of the plots seem like a triangle in that the lower portion of the data seems to have a positive trend with the number of reviews while the upper portion seems to have a downward trend with the number of reviews. However, for most of the boroughs, the upper portion of the data (above the median and mean lines) seems to have more data, so that the downward trend dominates.
+
+```{r, fig.height = 4}
+ggplot(data = airbnb_filtered, aes(x = number_of_reviews, y = price)) +
+    geom_point() +
+    geom_hline(aes(yintercept = mean(price)), color = "red", linetype = "dashed", size = 1) +
+    geom_hline(aes(yintercept = median(price)), color = "blue", linetype = "dashed", size = 1) +
+    facet_wrap(~neighbourhood_group) +
+    labs(x = "Number of reviews") +
+    ggtitle("Plot of log-price versus number of reviews")
+```
+
+We now turn to regression to try to see how the number of reviews and other variables can help determine the price of an Airbnb listing.
+
+## Regression of prices on other variables
+
+In this project, we thought that the best question to ask that could be answered with a linear model would be how the price of each Airbnb listing is related to the other variables in the dataset.
+
+We run four regressions: a simple regression containing all variables, backwards stepwise regression, forward stepwise regression, and best subsets regression. The outputs of the first three of these regressions are shown in Table 1 in columns (1), (2), and (3), respectively. Below, we discuss each model in more detail, followed by a separate discussion of the results of best subsets regression.
+
+```{r, warning = F, results = 'asis'}
+# including all variables
+mall <- lm(price ~ number_of_reviews + neighbourhood_group + room_type + 
+               minimum_nights + reviews_per_month + calculated_host_listings_count +
+               availability_365, data = airbnb_filtered)
+
+# backwards stepwise regression
+msb <- step(mall, direction = "backward", trace = FALSE)
+
+# forwards stepwise regression
+msf <- step(lm(price ~ 1, data = airbnb_filtered),
+            scope = formula(mall), direction = "forward", trace = FALSE)
+
+# additional information for the regression output
+aics <- c(extractAIC(mall)[2], extractAIC(msb)[2], extractAIC(msf)[2])
+names <- c("Number of reviews", "Borough: Brooklyn", "Borough: Manhattan",
+           "Borough: Queens", "Borough: Staten Island", "Room type: private room",
+           "Room type: shared room", "Minimum nights", "Review per month",
+           "Host listings count", "365-day availability", "Constant")
+
+# make a pretty regression output using stargazer
+stargazer::stargazer(mall, msb, msf,
+                     column.labels = c("All", "Backwards", "Forward"),
+                     covariate.labels = names,
+                     title = "Linear regression predicting price",
+                     add.lines = list(c("AIC", round(aics, 1))),
+                     df = FALSE, header = FALSE)
+```
+
+### All variables
+
+To start, we ran a linear model predicting the price of each listing by all of the other variables that made sense to regress on (the title of the listing wouldn't really make sense, for example). The output of this regression is shown as Model (1) in Table 1. This model has an AIC of -58573.25. In order for another model to be better than that one, it would have to lower the  AIC.
+
+### Stepwise
+
+One method of finding the best regression is to implement backward stepwise regression, where we start with a regression that contains all the possible variables, and we take out variables that would improve the AIC (usually variables with the highest p-values). Another commonly used method is called forward stepwise regression, essentially the opposite of backwards stepwise regression. Here, we instead start with a model that has no explanatory variables and add variables one by one until the AIC can no longer be lowered by adding another variable. Luckily, there is a function in R that automates both of these processes.
+
+After performing both types of regression, we ended up with the same two models. While one would think that this would always be the case, it is not certain that the two methods will always come up with the same model. The fact that the same model was established by both methods is a good indicator that the model is quite robust. The model that the two methods came up with contained these variables:
+
+- Number of reviews
+- Neighbourhood group
+- Room type
+- Minumum nights
+- Availability
+
+Oddly enough, there is a negative coefficient given to number of reviews, suggesting that more reviews means a lower price. However, the more likely explanation is simply that lower priced listings attract more people who then review the listing. A same trend is found with the minumun nights variables, but this likely means that if minimum nights are higher, owners who are listing likely have to make people go for their listing. Meanwhile, as availability increases, price also increases. Similar to the other variables, a possible interpretation is that a listing with a higher price is not as appealing so it will be booked for less of the year than cheaper listings.
+
+### Best subsets
+
+Another method for finding the best regression model involves using the `leaps::regsubsets()` function in R. By doing so, every combination of models between 0 variables and the maximum number of variables dictated are performed and the best one is chosen for each amount of variables allowed. Given that the original model with all possible variables had 11 variables (when including the various levels of variables like room type), I chose the maximum number of variables to be 11.
+
+```{r, fig.height = 3}
+# best subsets regression
+mrs <- regsubsets(price ~ number_of_reviews + neighbourhood_group + room_type + 
+                      minimum_nights + reviews_per_month + calculated_host_listings_count +
+                      availability_365, data = airbnb_filtered, nvmax = 11)
+
+mrs_sum <- summary(mrs)                             # extract summary
+pvec <- 1 + (1:11)                                  # to use when calculating AIC
+mrs_sum$aic <- n * log(mrs_sum$rss / 2) + 2 * pvec  # calculate AIC
+
+# plot AIC for each model
+qplot(1:11, mrs_sum$aic) + 
+    labs(x = "# of variables", y = "AIC")
+```
+
+```{r}
+# minimum AIC
+(aic_min <- which.min(mrs_sum$aic))
+```
+
+```{r}
+mrs_vars <- mrs_sum$which[aic_min, ]
+names(mrs_vars)[2:12] <- names[1:11]
+mrs_vars %>% knitr::kable(col.names = c("In model?"))
+```
+
+After looking at the AIC of all the models, it was found that 8 variables is the best number of variables to have which creates a model consisting of neighbourhood group, room type, minimum nights, number of reviews, and  availability (each level of multi-level variables count as its own variable). We again come up with the same model we have twice before, reaffirming the validity of the model.
+
+## Do prices differ between groups?
+
+After seeing that the neighborhood group and room type variables were siginificant predictors in the model, we decided it would be interesting to perform ANOVA to look at **how the mean of the prices in each neighborhood differ from the other** and **how they differ between room types as well**.
+
+### Exploration
+
+We started by plotting a basic boxplot for both variables to get an idea on the distribution within the categories of each variable. On the boxplots, the red dots represent the mean within the category and its value is displayed above the dot. A quick examination made it clear that there are indeed differences between the prices by room type, so we decided to test this with ANOVA.
+
+```{r, fig.height = 3.5}
+# calculate mean price for each room type
+means_rooms <- tapply(airbnb_filtered$price, airbnb_filtered$room_type, mean)
+
+# boxplot for room type
+par(mar = c(4, 4, 2.5, 2))
+boxplot(price ~ room_type, data = airbnb_filtered,
+        col = "grey", main = "Price by room type", xlab = "Room type")
+points(means_rooms, col = "red", pch = 19, cex = 1.2)
+text(x = c(1:3), y = means_rooms + .65, labels = round(means_rooms, 2))
+```
+
+```{r, fig.height = 3.5}
+# calculate mean price in each borough
+means_neigh <- tapply(airbnb_filtered$price, airbnb_filtered$neighbourhood_group, mean)
+
+# make boxplot for each borough
+par(mar = c(4, 4, 2.5, 2))
+boxplot(price ~ neighbourhood_group, data = airbnb_filtered,
+        col = "grey", main = "Price by borough", xlab = "Borough")
+points(means_neigh, col = "red", pch = 19, cex = 1.2)
+text(x = c(1:6), y = means_neigh + .65, labels = round(means_neigh, 2))
+```
+
+### Assumptions
+
+Two of the assumptions of ANOVA can be stated as follows. First, an assumption is made that the data within each group follows an approximately normal distribution. There is also an assumption that the standard deviation acorss the groups is the same. We discuss these assumptions below:
+
+#### Normality
+
+Within each group, whether we are looking at room type or neighbourhood group, the data is not perfectly normally distributed in a normal fashion, it appears to suffice for the test.
+
+```{r, fig.height = 2.5}
+ggnorm <- function(x, label) {
+    ggplot(mapping = aes(sample = x)) +
+        stat_qq(color = "red") + 
+        stat_qq_line(color = "blue") +
+        labs(title = paste("QP:", label))
+}
+
+airbnb_filtered %>%
+    tidyr::nest(data = -room_type) %>%
+    mutate(qqplot = purrr::map2(data, room_type, ~ggnorm(.x$price, .y))) %>%
+    gridExtra::grid.arrange(grobs = .$qqplot, ncol = 3)
+```
+
+
+```{r}
+airbnb_filtered %>%
+    tidyr::nest(data = -neighbourhood_group) %>%
+    mutate(qqplot = purrr::map2(data, neighbourhood_group, ~ggnorm(.x$price, .y))) %>%
+    gridExtra::grid.arrange(grobs = .$qqplot, ncol = 3)
+```
+
+#### Homoscedasticity
+
+When looking at the ratio between the largest standard deviation value and the smallest, we see that the standard deviations are essentially the same. With a ratio of approximately 1.2 for both the room type and neighborhood group standard deviations, we will proceed with ANOVA.
+
+```{r}
+# standard deviation by room type
+sds_room <- tapply(airbnb_filtered$price, airbnb_filtered$room_type, sd)
+sds_room %>% round(4) %>% knitr::kable(col.names = c("Std. dev."))
+
+# ratio of max/min sample SD
+round(max(sds_room) / min(sds_room), 2)
+```
+
+\newpage
+
+```{r}
+# standard deviation by borough
+sds_borough <- tapply(airbnb_filtered$price, airbnb_filtered$neighbourhood_group, sd)
+sds_borough %>% round(4) %>% knitr::kable(col.names = c("Std. dev."))
+
+round(max(sds_borough) / min(sds_borough), 2) # ratio of max/min sample SD
+```
+
+### Parametric test (ANOVA)
+
+After establishing that the assumptions for ANOVA are reasonably met in this dataset, we decided to continue and run the ANOVA to see whether the mean log-price of airbnb listings was different between each neighborhood and each room type. Using the `aov()` function, we found that there was a statistically significant difference in both cases, with *p*-values equal to approximately zero for both comparisons.
+
+```{r}
+# ANOVA for room type
+aovroom <- aov(price ~ room_type, data = airbnb_filtered)
+aovroom %>% Anova() %>% knitr::kable()
+
+# ANOVA for borough
+aovneigh <- aov(price ~ neighbourhood_group, data = airbnb_filtered)
+aovneigh %>% Anova() %>% knitr::kable()
+```
+
+While these results tell us that there is a differnce in general between the levels of each factor, a global ANOVA test does not tell us which specific levels of each factor are different from each other In order to evaluate that separate question, we used a pairwise *t*-test within each group. In doing so, we found that the mean log-price for each Airbnb listing was signficantly different in every combination of two room types, with *p*-values approximately equal to 0. Meanwhile, the mean price between Airbnb listings in different neighborhoods were also significantly different from each other, but with varying *p*-values, signifying that some of the neighborhoods are different from each other, but that they are less different than most other pairs of neighborhoods. There is even one case where the difference between the two neigborhoods is not considered significant; when comparing the mean log-prices between Staten Island and Queens, our test only comes up with a *p*-value of 0.242, much larger than the .05 value that would typically lead us to reject our null hypothesis. Meanwhile, the same comparison between the Bronx and Staten Island yielded a p-value of .011, suggesting that we are not as confident that these two boroughs have prices that are different.
+
+```{r}
+# pairwise t-tests for room type (p-values)
+results_room <- pairwise.t.test(airbnb_filtered$price, airbnb_filtered$room_type)
+results_room$p.value %>% round(4) %>% knitr::kable()
+
+# pairwise t-tests for borough (p-values)
+results_neigh <- pairwise.t.test(airbnb_filtered$price, airbnb_filtered$neighbourhood_group)
+results_neigh$p.value %>% round(4) %>% knitr::kable()
+```
+
+### Nonparametric test (Kruskal-Wallis)
+
+Finally, we mentioned above that there are two assumptions that come with performing ANOVA. While we went ahead and said that the approximately normal distribution assumption was met, we wanted to include a test that would test the same thing without the assumptions being made, the Kruskal-Wallis test. Even under this test, we still find a *p*-value of less than 2e-16, leading us to a resounding conclusion that there is a difference between the mean log-prices of Airbnb listings between different room types and between different neighborhoods in New York City.
+
+```{r}
+kruskal.test(airbnb_filtered$price, airbnb_filtered$room_type)
+kruskal.test(airbnb_filtered$price, airbnb_filtered$neighbourhood_group)
+```
+
+\newpage
+
+# Where listings are most expensive, controlling for local rent
+
+Our analysis above demonstrated that Airbnb listings in each borough had statistically significant mean prices. But this is not necessarily surprising: after all, we expect Airbnbs to be more expensive in Manhattan in part because real estate prices are more expensive in Manhattan as a whole. What if we tried to "remove" the effect of local real estate prices? In this section, we'll look at whether Airbnbs are more or less expensive, *controlling* for local real estate prices.
+
+Our basic methodology will be to obtain median monthly rent data from the 2018 American Community Survey and calculate a *ratio* of the price of a listing divided by median monthly rent. We'll multiply the numerator of the ratio by 30 because listing prices in our dataset are nightly, and we'll use the median monthly rent by census tract because that's the most detailed scope provided by the data. Thus, we'll calculate
+$$
+\text{Price-to-rent ratio} = \frac{30 \times \text{nightly list price}}{\text{median monthly rent within the census tract}}
+$$
+In theory, if an Airbnb host were recoop exactly 100% of their monthly rent from the Airbnb listing, then the value of this price-to-rent should be 1. Under this interpretation, the value of the measure that we calculate is an indicator of how "overpriced" a specific Airbnb listing is compared to the median rent in the area.
+
+Note that we don't expect the value of the price-to-rent ratio to be exactly equal to 1 for several reasons:
+
+- The listing price in our dataset is the price per night, but Airbnb hosts often give discounts for longer-term rentals, which we have no way to account for;
+- Hosts might not expect their unit to be occupied every night of the month, so they need to apply a markup in order to recoop the unoccupied nights;
+- Hosts might want to markup their listing because of a perceived "premium" of living in a certain area, or due to various economic forces relating to supply and demand
+- Many listing prices are actually calculated algorithmically by Airbnb, rather than set by the host; hosts turn on an option for Airbnb to optimize the price of their listing for maximum revenue
+
+Our dataset isn't able to capture the effects of the first two factors, so any effects we observe would really come from the last two factors (or some additional counfounders). We also want to emphasize that the actual numerical *value* of the ratio we calculate doesn't mean much, largely due to the fact that we don't know how much hosts are marking up their properties and how much of a long-term rental discount they might give. The primary utility of the ratio is to be able to compare this value across different areas in New York City.
+
+First, we'll load several packages we'll use for manipulating spatial data.
+
+```{r}
+if(!require(tidycensus)) install.packages("tidycensus"); library(tidycensus)
+if(!require(sf)) install.packages("sf"); library(sf)
+if(!require(lwgeom)) install.packages("lwgeom"); library(lwgeom)
+if(!require(tigris)) install.packages("tigris"); library(tigris)
+if(!require(ggmap)) install.packages("ggmap"); library(ggmap)
+```
+
+## Getting median rent data
+
+We'll use the `tidycensus` package, which acts as a wrapper for the U.S. Census API, to obtain our rent data.
+
+```{r, results = 'hide'}
+# register API key
+census_api_key("2e54a07ef5cc79b0dd81c704f015c36d7316a4b4")
+
+# allows us to erase bodies of water that are within tract boundaries
+st_erase <- function(x, y) st_difference(x, st_union(y))
+
+# get bodies of water
+ny_water <- area_water("NY", "New York", class = "sf")
+
+# get data, perform a few manipulations, and save
+median_rent <- get_acs(geography = "tract", state = "NY",
+                       county = c("New York", "Kings", "Bronx", "Queens", "Richmond"),
+                       variables = list(MedianRent = "B25064_001"),  # variable code for rent
+                       year = 2018, geometry = TRUE, cb = FALSE) %>%
+    st_erase(ny_water) %>%  # remove water that's within boundaries
+    rename(fips = GEOID, full_name = NAME) %>%
+    mutate(county = str_extract(full_name, "(?<=, ).*(?= County)"),
+           tract = str_extract(full_name, "(?<=Tract ).*(?=, .* County)"))
+```
+
+Note that the `geometry = TRUE` parameter tells `tidycensus::get_acs()` to also return the cartographic boundaries for each census tract, in addition to identifying features and the value of the median rent in each census tract. These shapefiles allow us to visualize our data later on. There's a small correction we'll make, however: the boundaries of some census tracts extend into bodies of water, and `st_erase(., ny_water)` cuts out these bodies of water so that our visualizations are more accurate.
+
+## Performing the spatial join
+
+Our primary Airbnb dataset provides the latitude and longitude of each listing, so we use `st_as_sf()` to convert these coordinates to a `sf` object. `sf` stands for "simple features", and allows geographic points, lines, and polygons to easily be merged. We do the same for our median rent data.
+
+```{r}
+airbnb_sf <- st_as_sf(airbnb, coords = c("longitude", "latitude"), crs = 4269)
+median_rent_sf <- st_as_sf(median_rent)
+```
+
+Finally, we merge these two datasets. This is much like any other merge, except here we're using a geographic coordinate: for each coordinate, which census tract does it fall into, and what is the median rent? Then, we aggregate by census tract to find the average price-to-rent ratio in the census tract.
+
+```{r}
+ratio_by_tract <- median_rent_sf %>%
+    st_join(airbnb_sf) %>%                            # spatial join
+    mutate(ratio = 30 * price / estimate) %>%         # calculate price-to-rent ratio
+    group_by(fips, full_name) %>%                     # group by census tract (fips)
+    summarize(avg_ratio = mean(ratio, na.rm = TRUE),  # calculate average ratio
+              n = n())
+```
+
+Before we proceed, we should get a sense for how these ratios are distributed:
+
+```{r, fig.height = 2.25}
+qplot(ratio_by_tract$avg_ratio, color = I("grey")) +
+    labs(title = "Distribution of price-to-rent ratios in each tract",
+         x = "Price-to-rent ratio", y = "Number of tracts")
+```
+
+```{r, eval = F, echo = F}
+ratio_by_tract %>% arrange(desc(avg_ratio))
+```
+
+This plot essentially confirms our hypothesis: even after "controlling" or "adjusting" for local median rent, some Airbnb listings have more of a markup. More importantly, it appears that our of nearly 2000 census tracts in New York City, there are a few very specific tracts that have extremely high average price-to-rent ratios, while the remaining listings have ratios that fall between 0 and 10. It turns out that there are 5 tracts with an average ratio above 20, 12 tracts with an average ratio above 15, and 19 tracts with an average ratio above 10.
+
+We don't want to remove these tracts, because these tracts are essentially the most "premium" tracts and can be interesting to look at. But when we plot them on a chloropleth map with a color scale, the extreme values of these ratios will throw the scale off, making it hard to discern disparities among the rest of the boroughs. So a better solution is to set the average ratio for the average ratio for the tracts that have an average ratio above 15 equal to 15. However, what we *will* remove is census tracts that don't have any Airbnb listings and those with only one listing (because the "average" might be skewed heavily by just one listing):
+
+```{r}
+ratio_by_tract_filtered <- ratio_by_tract %>%
+    mutate(avg_ratio = ifelse(avg_ratio > 15, 15, avg_ratio)) %>%
+    filter(!is.na(avg_ratio), n > 1)
+```
+
+## Visualizing price-to-rent ratio
+
+Now we can start mapping! Figure \ref{fig:mapbytract} shows the average price-to-rent ratio in each census tract.
+
+```{r fig.width = 6.5, fig.height = 8, fig.cap="\\label{fig:mapbytract}Ratio of Airbnb prices to median rent by census tract"}
+nyc_coords <- c(left = -74.330366, bottom = 40.436381, right = -73.663992, top = 40.962965)
+nyc_basemap <- get_map(location = nyc_coords, color = "bw")
+
+ggmap(nyc_basemap, base_layer = ggplot(ratio_by_tract_filtered)) +
+    geom_sf(aes(fill = avg_ratio), color = NA, alpha = 0.85) +
+    scale_fill_viridis_c(na.value = "transparent") +
+    labs(title = "Ratio of Airbnb prices to median rent by census tract",
+         subtitle = "Excludes tracts with only one property\n",
+         fill = "Average price-to-rent ratio") +
+    theme_void() +
+    theme(legend.position = "bottom", 
+          legend.direction = "horizontal", 
+          legend.box = "vertical", 
+          legend.justification = c(0, 1))
+```
+
+Based solely on Figure \ref{fig:mapbytract}, we can see a few trends. There are a few census tracts, shaded in yellow, including tracks in Far Rockaway (bottom right), Riverdale (top left), Bayside/Flushing (top right), and Staten Island (bottom left), as well as a few scattered across Manhattan. But these are generally outliers in their area.
+
+There are several sections of the city where there are many contiguous census tracts that all have a higher price-to-rent ratio. Lower Manhattan seems to have many census tracts that are shaded with a light teal, as does East Harlem (the top right of Manhattan). Neither of these are surprising: lower Manhattan is widely considered to be a "hip" area of the city, and Harlem is rapidly gentrifying (and potentially further buoyed by the upcoming extension of the Second Avenue Subway). We see similar trends in Bushwick (Brooklyn), but surprisingly downtown Wiliamsburg doesn't seem to be overpriced.
+
+Plotting average price-to-rent ratio by census tract is more informative for seeing exactly which street blocks tend to be overpriced, but census tracts don't have names. To get names, we aggregate by *neighborhood* (where one neighborhood contains approximately 10 to 15 census tracts):
+
+```{r}
+ratio_by_neighborhood <- median_rent_sf %>%
+    st_join(airbnb_sf) %>%
+    mutate(ratio = 30 * price / estimate) %>%
+    group_by(neighbourhood_group, neighbourhood) %>%
+    summarize(avg_ratio = mean(ratio, na.rm = TRUE), n = n())
+
+ratio_by_neighborhood_filtered <- ratio_by_neighborhood %>%
+    mutate(avg_ratio = ifelse(avg_ratio > 10, 10, avg_ratio)) %>%
+    filter(!is.na(avg_ratio),
+           n > 1)
+
+p1 <- ggmap(nyc_basemap, base_layer = ggplot(ratio_by_neighborhood_filtered)) +
+    geom_sf(aes(fill = avg_ratio), color = NA, alpha = 0.95) +
+    scale_fill_viridis_c(na.value = "transparent",
+                         limits = c(0, 10)) +
+    labs(title = "Price-to-rent ratio by neighborhood",
+         subtitle = "Excludes neighborhoods with just 1 property\n",
+         fill = "Avg. price-to-rent ratio") +
+    theme_void() +
+    theme(legend.position = "bottom", 
+          legend.direction = "horizontal", 
+          legend.box = "vertical", 
+          legend.justification = c(0, 1),
+          plot.margin = unit(rep(0.15, 4), "cm"))
+
+if(!require(ggrepel)) install.packages("ggrepel"); library(ggrepel)
+
+top_neighborhoods <- ratio_by_neighborhood %>% 
+    mutate(avg_ratio = ifelse(avg_ratio > 10, 10, avg_ratio)) %>%
+    filter(n > 1) %>%
+    arrange(desc(avg_ratio)) %>%
+    head(10)
+
+p2 <- ggmap(nyc_basemap, base_layer = ggplot(top_neighborhoods)) +
+    geom_sf(aes(fill = avg_ratio), color = NA, alpha = 0.95) +
+    ggrepel::geom_label_repel(
+        data = top_neighborhoods,
+        mapping = aes(label = neighbourhood, geometry = geometry),
+        stat = "sf_coordinates",
+        segment.size = 3,
+        min.segment.length = 3,
+        size = 3.5, color = "white",
+        fill = "black", alpha = 0.8
+    ) +
+    scale_fill_viridis_c(na.value = "transparent",
+                         limits = c(0, 10)) +
+    labs(title = "Most expensive neighborhoods",
+         subtitle = "Excludes neighborhoods with just 1 property\n",
+         fill = "Avg. price-to-rent ratio") +
+    theme_void() +
+    theme(legend.position = "bottom", 
+          legend.direction = "horizontal", 
+          legend.box = "vertical", 
+          legend.justification = c(0, 1),
+          plot.margin = unit(rep(0.15, 4), "cm"))
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+The left panel above shows a chloropleth map of the average price-to-rent ratio in each neighborhood. We see largely the same trends as before, except we note that nearly all of Brooklyn and Queens is now shaded with the same color, indicating that some of the comments we made earlier about census tracts in Bushwick and Flushing were largely outlier tracts, even within their neighborhoods. However, Manhattan remains consistently shaded with a lighter shade of teal, indicating that Manhattan does appear to be a generally "overpriced" borough.
+
+The right panel in above shows the top 10 most expensive boroughs. The Manhattan neighborhoods aren't surprising, as they're common tourist destinations. We suspect that the Staten Island neighborhoods may largely be driven by a lack of supply and a small sample size.
+
+## Testing trends statistically
+
+We can formally test whether each of the boroughs have a significantly different average price-to-rent ratio using an ANOVA test, much like what we conducted in the previous section, though the results shouldn't surprise anyone. First, since we saw above that the distribution of price-to-rent ratio is highly right-skewed, we'll apply a log-transform. The resulting distribution appears far more normally distributed, both overall and by group, with a slight departure from normality towards the tails.
+
+```{r}
+# re-merge the data and calculate log-ratio
+airbnb_merged <- airbnb_sf %>%
+    st_join(median_rent_sf) %>%
+    mutate(ratio = 30 * price / estimate,
+           logRatio = log(ratio + 0.000001)) %>%
+    filter(!is.na(logRatio)) %>%
+    rename(Borough = neighbourhood_group)
+```
+
+\newpage
+
+```{r}
+# generate normal quantile plots by group
+airbnb_merged %>%    
+    tidyr::nest(data = -Borough) %>%
+    mutate(qqplot = purrr::map2(data, Borough, ~ggnorm(.x$logRatio, .y))) %>%
+    gridExtra::grid.arrange(grobs = .$qqplot, ncol = 3)
+```
+
+The standard deviation of log-ratio in each borough is similar, with the ratio of the largest to smallest standard deviation being far smaller than 2:
+
+```{r}
+airbnb_merged %>%
+    group_by(Borough) %>%
+    summarize(sd = sd(logRatio)) %>% 
+    `st_geometry<-`(NULL) %>% 
+    knitr::kable()
+```
+
+\newpage
+
+```{r}
+aov(logRatio ~ Borough, data = airbnb_merged) %>% Anova() %>% knitr::kable()
+```
+
+As expected, we find the the (log)-average price-to-rent ratio is significantly different between boroughs.
+
+# Phrases used in listing names
+
+A natural question we're interested in is the words that are used often in Airbnb listings. Which words are used more often and which ones are used less? Other than words that are necessary like 'in', what adjectives are used to draw people to a particular area? Our plan is to create this plot by stratifying by area, and then investigating what words are used most often.
+
+```{r}
+# load packages used for text mining
+if(!require(tidytext)) install.packages("tidytext"); library(tidytext)
+if(!require(wordcloud)) install.packages("wordcloud"); library(wordcloud)
+```
+
+First, let's get the names of all the listings.
+
+```{r}
+textmining_will <- airbnb %>% select(name)
+```
+
+## Most frequent words
+
+We'll count the most frequent words, filtering out several groups of words:
+
+- Stopwords from the `stopwords` package, which are common words that don't have much meaning in text processing applications, such as "of" and "from"
+- Words that refer to location names, such as "Manhattan", "Harlem", etc., because these tell us about where the listing is, but not about qualities of the actual unit, which is what we're investigating
+- Words that refer to the type of room, such as "bedroom", "apartment", etc., because these tell us the type of room, but this information is captured in other variables in our dataset and again doesn't tell us much about adjectives that describe the room
+
+```{r}
+# break up each phrase into one row per word
+countfreq <- textmining_will %>%
+    unnest_tokens(output = character,
+                  input = name,
+                  to_lower = TRUE) %>%
+    count(character, sort = TRUE)
+
+# get stopwords database and add additional words
+stopwords <- stop_words %>% filter(lexicon == "snowball") %>% pull(word)
+morewords <- c("village", "east", "bushwick", "brooklyn", "a", "the", "to", 
+               "park", "manhattan", "harlem", "bedroom", "williamsburg", "in",
+               "1", "2", "with", "apartment", "apt", "room", "studio",
+               "nyc", "near", "w", "west", "upper", "side")
+
+# filter out various words
+countfreq <- countfreq %>%
+    filter(!(character %in% stopwords)) %>%
+    filter(!(character %in% morewords))
+```
+
+\newpage
+
+Finally, Figure \ref{fig:wordfreq} shows a plot of the most common words.
+
+```{r, fig.height = 5, fig.cap = "\\label{fig:wordfreq}Most frequently used words in Airbnb listings"}
+head(countfreq, 20) %>%
+    ggplot(aes(x = fct_reorder(character, n), y = n, fill = n)) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = n), hjust = -0.35, vjust = 0.45, size = 3) +
+    scale_fill_gradient(trans = "reverse") +
+    scale_y_continuous(expand = c(0.025, 1), limits = c(0, 8000)) +
+    coord_flip() +
+    theme_minimal() +
+    theme(panel.grid.major.y = element_blank()) +
+    labs(title = "   Most common words used in Airbnb listings",
+         x = "Word", y = "Count")
+```
+
+\newpage
+
+We can also visualize this information with a wordcloud, which is shown in Figure \ref{fig:wordcloud}:
+
+```{r, fig.height = 4, fig.cap = "\\label{fig:wordcloud}Wordcloud of most frequent words"}
+countfreq %>% with(wordcloud(character, n, max.words = 70))
+```
+
+With this simple investigation, it's quite clear that some words are used more often than others in the creation of listings. It seems that users care a lot about their privacy, how cozy their place is, as well as the spaciousness of their homes.
+
+## Effect of a word on listing prices
+
+Let's take this investigation slightly further, and see what the effect of certain words are on the popularity of a listing or it's price. We're going to use the number of reviews here as a proxy for how popular a particular listing is. Assuming a constant rate of reviewing, more popular destinations would get a larger absolute number of reviews. 
+
+We're also going to restrict our investigation to:
+
+* listings where we have the 'Entire place'
+* the neighborhood of Williamsburg (for no particular reason)
+
+Once we control for these two factors, a substantial amount of variation will be controlled for, allowing us to fairly compare subsets of prices to one another. 
+
+We want to investigate the effect of the word 'spacious' in a particular listing. Let's first load the data:
+
+```{r}
+word_investigation <- airbnb %>% 
+    filter(neighbourhood == "Williamsburg" & room_type == "Entire home/apt") %>%
+    filter(grepl("spacious | Spacious", name))
+```
+
+We have `r nrow(word_investigation)` entries here, which is a decent number of prices to compare to. Let's collect our other set of data that doesn't contain 'spacious.' 
+
+```{r}
+word_investigation_not <- airbnb %>% 
+    filter(neighbourhood == "Williamsburg" & room_type == "Entire home/apt") %>%
+    filter(!grepl("spacious | Spacious", name))
+```
+
+Briefly, we want to look at histograms of our data on the number of reviews in both groups so we can be certain that there are not any abnormalities.
+
+```{r, fig.height = 2.75}
+p1 <- qplot(word_investigation$number_of_reviews, color = I("white")) +
+    labs(x = "Number of reviews", y = "Frequency",
+         title = "With word \"spacious\"")
+
+p2 <- qplot(word_investigation_not$number_of_reviews, color = I("white")) +
+    labs(x = "Number of reviews", y = "Frequency",
+         title = "Without word \"spacious\"")
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+This is a long-tail distribution, which might make running tests like a *z*-test or a *t*-test problematic, since the variance might not be finite. But instead we're going to run a permutation test to compare the data to one another, which shouldn't depend on our choice of test statistic. 
+
+Let's first define our test statistic. We're going to use the statistic
+$$
+T = \overline{X} - \overline{Y}
+$$
+where $X_1,...,X_n$ are the values of the number of reviews in the set with 'spacious' and $Y_1,..., Y_m$ is the value of the number of reviews in the set without 'spacious.' 
+
+We're going to do a permutation test with 10,000 iterations to determine a permutation for the null distribution. 
+
+```{r}
+# calculate observed test statistic
+x_vec <- word_investigation$number_of_reviews
+y_vec <- word_investigation_not$number_of_reviews
+total_vec <- c(x_vec, y_vec)
+t_og <- mean(x_vec) - mean(y_vec)
+t_og
+```
+
+```{r distsim, fig.cap = "Distribution of permuted test statistics"}
+# set up container
+t_vec <- numeric(10000)
+
+# iterate 10,000 times
+for(i in 1:10000){
+  x_temp_vec <-  sample(total_vec,length(x_vec), replace = FALSE)
+  y_temp_vec <- total_vec[-x_temp_vec]
+  t_vec[i] <- mean(x_temp_vec) - mean(y_temp_vec)
+}
+
+qplot(t_vec, color = I("white")) +
+    labs(x = "Value of our statistic",
+         title = "Histogram of frequency of test statistic")
+```
+
+Then, we can compare our true statistic to this distribution. Say we want to reject when $\alpha$ = 0.05:
+
+```{r}
+quantile(t_vec, c(0.025, 0.975))
+```
+
+Based on this result, we would not reject with out original *t*-value of -0.57. Hence having the word 'spacious' does not affect the number of reviews that a unit receives.
+
+\newpage
+
+# References
+
+Fellows, Ian (2018). wordcloud: Word Clouds. R package version 2.6. https://CRAN.R-project.org/package=wordcloud
+
+Hlavac, Marek (2018). stargazer: Well-Formatted Regression and Summary Statistics Tables. R package version 5.2.1. https://CRAN.R-project.org/package=stargazer
+
+Kahle, David and H. Wickham. ggmap: Spatial Visualization with ggplot2. The R Journal, 5(1), 144-161. URL http://journal.r-project.org/archive/2013-1/kahle-wickham.pdf
+
+Pebesma, Edzer (2018). Simple Features for R: Standardized Support for Spatial Vector Data. The R Journal 10 (1), 439-446, https://doi.org/10.32614/RJ-2018-009
+
+Silge, Julia and David Robinson (2016). “tidytext: Text Mining and Analysis Using Tidy Data Principles in R.” _JOSS_, *1*(3). doi: 10.21105/joss.00037 (URL: https://doi.org/10.21105/joss.00037), <URL:
+http://dx.doi.org/10.21105/joss.00037>.
+
+Slowikowski, Kamil (2020). ggrepel: Automatically Position Non-Overlapping Text Labels with 'ggplot2'. R package version 0.8.2. https://CRAN.R-project.org/package=ggrepel
+
+Walker, Kyle (2020). tidycensus: Load US Census Boundary and Attribute Data as 'tidyverse' and 'sf'-Ready Data Frames. R package version 0.9.9.2. https://CRAN.R-project.org/package=tidycensus
+
+Wickham et al., (2019). Welcome to the tidyverse. Journal of Open Source Software, 4(43), 1686, https://doi.org/10.21105/joss.01686
+
+```{r}
+R.version
+```
+
